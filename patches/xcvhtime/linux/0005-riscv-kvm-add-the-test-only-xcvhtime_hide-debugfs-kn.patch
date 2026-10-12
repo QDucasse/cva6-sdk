@@ -1,0 +1,197 @@
+From 77be4fb77bd2768060f7cfccee61097242789a55 Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Mon, 12 Oct 2026 17:13:50 +0200
+Subject: [PATCH 5/5] riscv: kvm, add the test-only xcvhtime_hide debugfs knob
+
+With the knob on, the guest is entered with HHAE=1, so every exit KVM
+handles in-kernel is hidden from the guest clock. WFI and vcpu_put (exit
+to userspace, preemption) clear HHAE and mark the vCPU unhidden; the next
+entry then rebases hexit_time/hexit_cycle to now, so idle and descheduled
+time stay visible.
+---
+ arch/riscv/include/asm/kvm_vcpu_xcvhtime.h |  5 ++
+ arch/riscv/kvm/main.c                      |  2 +
+ arch/riscv/kvm/vcpu.c                      |  1 +
+ arch/riscv/kvm/vcpu_insn.c                 |  2 +
+ arch/riscv/kvm/vcpu_xcvhtime.c             | 73 +++++++++++++++++++++-
+ 5 files changed, 81 insertions(+), 2 deletions(-)
+
+diff --git a/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h b/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
+index 0a460ae3e..002e59e91 100644
+--- a/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
++++ b/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
+@@ -17,13 +17,18 @@ struct kvm_vcpu_xcvhtime {
+ 	u64 hvtimecmp;
+ 	u64 hexit_cycle;
+ 	u64 hhidden_cycle;
++	/* Last exit not hidden: rebase hexit_* before setting HHAE */
++	bool unhidden;
+ };
+ 
+ void kvm_riscv_xcvhtime_enable(void);
+ void kvm_riscv_xcvhtime_disable(void);
++void kvm_riscv_xcvhtime_debugfs_init(void);
+ void kvm_riscv_vcpu_xcvhtime_reset(struct kvm_vcpu *vcpu);
+ void kvm_riscv_vcpu_xcvhtime_load(struct kvm_vcpu *vcpu);
+ void kvm_riscv_vcpu_xcvhtime_put(struct kvm_vcpu *vcpu);
++void kvm_riscv_vcpu_xcvhtime_enter(struct kvm_vcpu *vcpu);
++void kvm_riscv_vcpu_xcvhtime_unhide(struct kvm_vcpu *vcpu);
+ void kvm_riscv_vcpu_xcvhtime_sync(struct kvm_vcpu *vcpu);
+ u64 kvm_riscv_vcpu_xcvhtime_hidden(struct kvm_vcpu *vcpu);
+ int kvm_riscv_vcpu_xcvhtime_hvti(struct kvm_vcpu *vcpu);
+diff --git a/arch/riscv/kvm/main.c b/arch/riscv/kvm/main.c
+index e37ebda55..28f6653a5 100644
+--- a/arch/riscv/kvm/main.c
++++ b/arch/riscv/kvm/main.c
+@@ -186,6 +186,8 @@ static int __init riscv_kvm_init(void)
+ 		return rc;
+ 	}
+ 
++	kvm_riscv_xcvhtime_debugfs_init();
++
+ 	return 0;
+ }
+ module_init(riscv_kvm_init);
+diff --git a/arch/riscv/kvm/vcpu.c b/arch/riscv/kvm/vcpu.c
+index 49d207637..5e352384a 100644
+--- a/arch/riscv/kvm/vcpu.c
++++ b/arch/riscv/kvm/vcpu.c
+@@ -974,6 +974,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+ 
+ 		guest_timing_enter_irqoff();
+ 
++		kvm_riscv_vcpu_xcvhtime_enter(vcpu);
+ 		kvm_riscv_vcpu_enter_exit(vcpu, &trap);
+ 
+ 		vcpu->mode = OUTSIDE_GUEST_MODE;
+diff --git a/arch/riscv/kvm/vcpu_insn.c b/arch/riscv/kvm/vcpu_insn.c
+index f09f9251d..b06b3876d 100644
+--- a/arch/riscv/kvm/vcpu_insn.c
++++ b/arch/riscv/kvm/vcpu_insn.c
+@@ -66,6 +66,8 @@ static int truly_virtual_insn(struct kvm_vcpu *vcpu, struct kvm_run *run,
+  */
+ void kvm_riscv_vcpu_wfi(struct kvm_vcpu *vcpu)
+ {
++	/* Never hide idle time, or the guest timer cannot fire */
++	kvm_riscv_vcpu_xcvhtime_unhide(vcpu);
+ 	if (!kvm_arch_vcpu_runnable(vcpu)) {
+ 		kvm_vcpu_srcu_read_unlock(vcpu);
+ 		kvm_vcpu_halt(vcpu);
+diff --git a/arch/riscv/kvm/vcpu_xcvhtime.c b/arch/riscv/kvm/vcpu_xcvhtime.c
+index 57e56a46f..395c86bd0 100644
+--- a/arch/riscv/kvm/vcpu_xcvhtime.c
++++ b/arch/riscv/kvm/vcpu_xcvhtime.c
+@@ -3,20 +3,39 @@
+  * CORE-V hidden time (xcvhtime): VM-exit time hiding.
+  *
+  * The CSRs are saved and restored in-kernel only (no ONE_REG). HHAE is
+- * left at 0, so the guest clock only differs from time + htimedelta by
+- * whatever hhidden_time holds.
++ * 0 by default. The test-only debugfs knob kvm/xcvhtime_hide enters the
++ * guest with HHAE=1, so every exit handled in-kernel is hidden; WFI and
++ * vcpu_put (exit to userspace, preemption) clear it, so sleep and
++ * descheduled time stay visible.
+  */
+ 
++#include <linux/debugfs.h>
+ #include <linux/kvm_host.h>
+ #include <asm/csr.h>
+ #include <asm/cpufeature.h>
+ #include <asm/kvm_vcpu_xcvhtime.h>
+ 
++static bool xcvhtime_hide;
++
+ static bool xcvhtime_available(void)
+ {
+ 	return riscv_has_extension_unlikely(RISCV_ISA_EXT_XCVHTIME);
+ }
+ 
++void kvm_riscv_xcvhtime_debugfs_init(void)
++{
++	struct dentry *dir;
++
++	if (!xcvhtime_available())
++		return;
++
++	dir = debugfs_lookup("kvm", NULL);
++	if (IS_ERR_OR_NULL(dir))
++		return;
++	debugfs_create_bool("xcvhtime_hide", 0644, dir, &xcvhtime_hide);
++	dput(dir);
++}
++
+ void kvm_riscv_xcvhtime_enable(void)
+ {
+ 	/* mip[24] is only pending in V=1: it always traps out of the guest */
+@@ -36,6 +55,7 @@ void kvm_riscv_vcpu_xcvhtime_reset(struct kvm_vcpu *vcpu)
+ 
+ 	memset(h, 0, sizeof(*h));
+ 	h->hvtimecmp = -1ULL;
++	h->unhidden = true;
+ }
+ 
+ void kvm_riscv_vcpu_xcvhtime_load(struct kvm_vcpu *vcpu)
+@@ -67,11 +87,60 @@ void kvm_riscv_vcpu_xcvhtime_put(struct kvm_vcpu *vcpu)
+ 	h->hexit_cycle = csr_read(CSR_HEXIT_CYCLE);
+ 	h->hhidden_cycle = csr_read(CSR_HHIDDEN_CYCLE);
+ 
++	/* Exit to userspace or preemption: not hidden (section 8.2) */
++	h->htimectl &= ~HTIMECTL_HHAE;
++	h->unhidden = true;
++
+ 	/* Nothing hidden or armed while no vCPU is loaded */
+ 	csr_write(CSR_HTIMECTL, 0);
+ 	csr_write(CSR_HVTIMECMP, -1UL);
+ }
+ 
++/* Called with interrupts off, right before entering the guest */
++void kvm_riscv_vcpu_xcvhtime_enter(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_xcvhtime *h = &vcpu->arch.xcvhtime;
++
++	if (!xcvhtime_available())
++		return;
++
++	if (!READ_ONCE(xcvhtime_hide)) {
++		if (h->htimectl & HTIMECTL_HHAE)
++			kvm_riscv_vcpu_xcvhtime_unhide(vcpu);
++		return;
++	}
++
++	/*
++	 * HHAE must already be 1 when the exit happens, so it is set on every
++	 * entry. After an exit that was not hidden, hexit_* still hold that
++	 * exit's time: rebase them to now so the entry hides nothing.
++	 */
++	if (h->unhidden) {
++		h->hexit_time = csr_read(CSR_TIME);
++		h->hexit_cycle = csr_read(CSR_CYCLE);
++		csr_write(CSR_HEXIT_TIME, h->hexit_time);
++		csr_write(CSR_HEXIT_CYCLE, h->hexit_cycle);
++		h->unhidden = false;
++	}
++	if (!(h->htimectl & HTIMECTL_HHAE)) {
++		h->htimectl |= HTIMECTL_HHAE;
++		csr_write(CSR_HTIMECTL, h->htimectl);
++	}
++}
++
++/* Make the last exit visible: the guest clock runs live again (section 8.1) */
++void kvm_riscv_vcpu_xcvhtime_unhide(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_xcvhtime *h = &vcpu->arch.xcvhtime;
++
++	if (!xcvhtime_available())
++		return;
++
++	h->htimectl &= ~HTIMECTL_HHAE;
++	csr_write(CSR_HTIMECTL, h->htimectl);
++	h->unhidden = true;
++}
++
+ void kvm_riscv_vcpu_xcvhtime_sync(struct kvm_vcpu *vcpu)
+ {
+ 	/* hhidden_time grows on each guest entry with HHAE=1 */
+-- 
+2.47.3
+
