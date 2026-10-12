@@ -1,0 +1,135 @@
+From dcffed6f706e21f34094305c2a72d7e5995fbe1d Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Mon, 12 Oct 2026 16:09:37 +0200
+Subject: [PATCH 3/4] riscv: kvm, handle the xcvhtime interrupt 24 in the exit
+ path
+
+---
+ arch/riscv/include/asm/kvm_host.h          |  1 +
+ arch/riscv/include/asm/kvm_vcpu_xcvhtime.h |  3 +++
+ arch/riscv/kvm/main.c                      |  4 ++++
+ arch/riscv/kvm/vcpu.c                      |  1 +
+ arch/riscv/kvm/vcpu_exit.c                 |  4 ++++
+ arch/riscv/kvm/vcpu_xcvhtime.c             | 23 ++++++++++++++++++++++
+ 6 files changed, 36 insertions(+)
+
+diff --git a/arch/riscv/include/asm/kvm_host.h b/arch/riscv/include/asm/kvm_host.h
+index f03cc2a53..36ed27e02 100644
+--- a/arch/riscv/include/asm/kvm_host.h
++++ b/arch/riscv/include/asm/kvm_host.h
+@@ -60,6 +60,7 @@ struct kvm_vcpu_stat {
+ 	struct kvm_vcpu_stat_generic generic;
+ 	u64 ecall_exit_stat;
+ 	u64 wfi_exit_stat;
++	u64 hvti_exit_stat;
+ 	u64 wrs_exit_stat;
+ 	u64 mmio_exit_user;
+ 	u64 mmio_exit_kernel;
+diff --git a/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h b/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
+index 00f1c7f21..0a460ae3e 100644
+--- a/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
++++ b/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
+@@ -19,10 +19,13 @@ struct kvm_vcpu_xcvhtime {
+ 	u64 hhidden_cycle;
+ };
+ 
++void kvm_riscv_xcvhtime_enable(void);
++void kvm_riscv_xcvhtime_disable(void);
+ void kvm_riscv_vcpu_xcvhtime_reset(struct kvm_vcpu *vcpu);
+ void kvm_riscv_vcpu_xcvhtime_load(struct kvm_vcpu *vcpu);
+ void kvm_riscv_vcpu_xcvhtime_put(struct kvm_vcpu *vcpu);
+ void kvm_riscv_vcpu_xcvhtime_sync(struct kvm_vcpu *vcpu);
+ u64 kvm_riscv_vcpu_xcvhtime_hidden(struct kvm_vcpu *vcpu);
++int kvm_riscv_vcpu_xcvhtime_hvti(struct kvm_vcpu *vcpu);
+ 
+ #endif
+diff --git a/arch/riscv/kvm/main.c b/arch/riscv/kvm/main.c
+index cb8a65273..e37ebda55 100644
+--- a/arch/riscv/kvm/main.c
++++ b/arch/riscv/kvm/main.c
+@@ -49,6 +49,8 @@ int kvm_arch_enable_virtualization_cpu(void)
+ 
+ 	csr_write(CSR_HVIP, 0);
+ 
++	kvm_riscv_xcvhtime_enable();
++
+ 	kvm_riscv_aia_enable();
+ 
+ 	return 0;
+@@ -58,6 +60,8 @@ void kvm_arch_disable_virtualization_cpu(void)
+ {
+ 	kvm_riscv_aia_disable();
+ 
++	kvm_riscv_xcvhtime_disable();
++
+ 	/*
+ 	 * After clearing the hideleg CSR, the host kernel will receive
+ 	 * spurious interrupts if hvip CSR has pending interrupts and the
+diff --git a/arch/riscv/kvm/vcpu.c b/arch/riscv/kvm/vcpu.c
+index b4c279ecd..49d207637 100644
+--- a/arch/riscv/kvm/vcpu.c
++++ b/arch/riscv/kvm/vcpu.c
+@@ -30,6 +30,7 @@ const struct kvm_stats_desc kvm_vcpu_stats_desc[] = {
+ 	KVM_GENERIC_VCPU_STATS(),
+ 	STATS_DESC_COUNTER(VCPU, ecall_exit_stat),
+ 	STATS_DESC_COUNTER(VCPU, wfi_exit_stat),
++	STATS_DESC_COUNTER(VCPU, hvti_exit_stat),
+ 	STATS_DESC_COUNTER(VCPU, wrs_exit_stat),
+ 	STATS_DESC_COUNTER(VCPU, mmio_exit_user),
+ 	STATS_DESC_COUNTER(VCPU, mmio_exit_kernel),
+diff --git a/arch/riscv/kvm/vcpu_exit.c b/arch/riscv/kvm/vcpu_exit.c
+index 0bb0c51e3..58ce63afd 100644
+--- a/arch/riscv/kvm/vcpu_exit.c
++++ b/arch/riscv/kvm/vcpu_exit.c
+@@ -189,6 +189,10 @@ int kvm_riscv_vcpu_exit(struct kvm_vcpu *vcpu, struct kvm_run *run,
+ {
+ 	int ret;
+ 
++	/* Hidden-time deadline: only pending in V=1, so handle it here */
++	if (trap->scause == (CAUSE_IRQ_FLAG | IRQ_XCV_HVTI))
++		return kvm_riscv_vcpu_xcvhtime_hvti(vcpu);
++
+ 	/* If we got host interrupt then do nothing */
+ 	if (trap->scause & CAUSE_IRQ_FLAG)
+ 		return 1;
+diff --git a/arch/riscv/kvm/vcpu_xcvhtime.c b/arch/riscv/kvm/vcpu_xcvhtime.c
+index 04301ddcf..57e56a46f 100644
+--- a/arch/riscv/kvm/vcpu_xcvhtime.c
++++ b/arch/riscv/kvm/vcpu_xcvhtime.c
+@@ -17,6 +17,19 @@ static bool xcvhtime_available(void)
+ 	return riscv_has_extension_unlikely(RISCV_ISA_EXT_XCVHTIME);
+ }
+ 
++void kvm_riscv_xcvhtime_enable(void)
++{
++	/* mip[24] is only pending in V=1: it always traps out of the guest */
++	if (xcvhtime_available())
++		csr_set(CSR_IE, BIT(IRQ_XCV_HVTI));
++}
++
++void kvm_riscv_xcvhtime_disable(void)
++{
++	if (xcvhtime_available())
++		csr_clear(CSR_IE, BIT(IRQ_XCV_HVTI));
++}
++
+ void kvm_riscv_vcpu_xcvhtime_reset(struct kvm_vcpu *vcpu)
+ {
+ 	struct kvm_vcpu_xcvhtime *h = &vcpu->arch.xcvhtime;
+@@ -70,3 +83,13 @@ u64 kvm_riscv_vcpu_xcvhtime_hidden(struct kvm_vcpu *vcpu)
+ {
+ 	return vcpu->arch.xcvhtime.hhidden_time;
+ }
++
++int kvm_riscv_vcpu_xcvhtime_hvti(struct kvm_vcpu *vcpu)
++{
++	/* Level-triggered: disarm, or it fires again on guest entry */
++	csr_write(CSR_HVTIMECMP, -1UL);
++	vcpu->arch.xcvhtime.hvtimecmp = -1ULL;
++	vcpu->stat.hvti_exit_stat++;
++
++	return 1;
++}
+-- 
+2.47.3
+

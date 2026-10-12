@@ -1,0 +1,68 @@
+From 615bc957c26da7f336db27076eec4a6dc0536ecc Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Mon, 12 Oct 2026 16:07:30 +0200
+Subject: [PATCH 1/4] riscv: add the xcvhtime hidden-time extension, its CSRs
+ and interrupt
+
+---
+ arch/riscv/include/asm/csr.h   | 11 +++++++++++
+ arch/riscv/include/asm/hwcap.h |  1 +
+ arch/riscv/kernel/cpufeature.c |  1 +
+ 3 files changed, 13 insertions(+)
+
+diff --git a/arch/riscv/include/asm/csr.h b/arch/riscv/include/asm/csr.h
+index 31b8988f4..16bbd8fc3 100644
+--- a/arch/riscv/include/asm/csr.h
++++ b/arch/riscv/include/asm/csr.h
+@@ -99,6 +99,8 @@
+ #define IRQ_M_EXT		11
+ #define IRQ_S_GEXT		12
+ #define IRQ_PMU_OVF		13
++/* CORE-V hidden time (xcvhtime): hvtimecmp deadline, always taken in HS */
++#define IRQ_XCV_HVTI		24
+ #define IRQ_LOCAL_MAX		(IRQ_PMU_OVF + 1)
+ #define IRQ_LOCAL_MASK		GENMASK((IRQ_LOCAL_MAX - 1), 0)
+ 
+@@ -383,6 +385,15 @@
+ #define CSR_HVIP		0x645
+ #define CSR_HTINST		0x64a
+ #define CSR_HGATP		0x680
++
++/* CORE-V hidden time (xcvhtime) */
++#define CSR_HTIMECTL		0x6c0
++#define CSR_HEXIT_TIME		0x6c1
++#define CSR_HHIDDEN_TIME	0x6c2
++#define CSR_HVTIMECMP		0x6c3
++#define CSR_HEXIT_CYCLE		0x6c4
++#define CSR_HHIDDEN_CYCLE	0x6c5
++#define HTIMECTL_HHAE		_AC(0x1, UL)
+ #define CSR_HGEIP		0xe12
+ 
+ /* Virtual Interrupts and Interrupt Priorities (H-extension with AIA) */
+diff --git a/arch/riscv/include/asm/hwcap.h b/arch/riscv/include/asm/hwcap.h
+index 7ef8e5f55..29ef82e14 100644
+--- a/arch/riscv/include/asm/hwcap.h
++++ b/arch/riscv/include/asm/hwcap.h
+@@ -112,6 +112,7 @@
+ #define RISCV_ISA_EXT_ZCLSD		103
+ #define RISCV_ISA_EXT_ZICFILP		104
+ #define RISCV_ISA_EXT_ZICFISS		105
++#define RISCV_ISA_EXT_XCVHTIME		106
+ 
+ #define RISCV_ISA_EXT_XLINUXENVCFG	127
+ 
+diff --git a/arch/riscv/kernel/cpufeature.c b/arch/riscv/kernel/cpufeature.c
+index f46aa5602..42d29e333 100644
+--- a/arch/riscv/kernel/cpufeature.c
++++ b/arch/riscv/kernel/cpufeature.c
+@@ -590,6 +590,7 @@ const struct riscv_isa_ext_data riscv_isa_ext[] = {
+ 	__RISCV_ISA_EXT_DATA(svpbmt, RISCV_ISA_EXT_SVPBMT),
+ 	__RISCV_ISA_EXT_DATA(svrsw60t59b, RISCV_ISA_EXT_SVRSW60T59B),
+ 	__RISCV_ISA_EXT_DATA(svvptc, RISCV_ISA_EXT_SVVPTC),
++	__RISCV_ISA_EXT_DATA(xcvhtime, RISCV_ISA_EXT_XCVHTIME),
+ };
+ 
+ const size_t riscv_isa_ext_count = ARRAY_SIZE(riscv_isa_ext);
+-- 
+2.47.3
+

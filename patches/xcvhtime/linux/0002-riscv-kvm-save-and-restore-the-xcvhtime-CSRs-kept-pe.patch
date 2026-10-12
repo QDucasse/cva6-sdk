@@ -1,0 +1,202 @@
+From 15cdf751efb94db7408c2e859a18ab354ecf4d37 Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Mon, 12 Oct 2026 16:08:59 +0200
+Subject: [PATCH 2/4] riscv: kvm, save and restore the xcvhtime CSRs, kept per
+ vCPU
+
+---
+ arch/riscv/include/asm/kvm_host.h          |  4 ++
+ arch/riscv/include/asm/kvm_vcpu_xcvhtime.h | 28 +++++++++
+ arch/riscv/kvm/Makefile                    |  1 +
+ arch/riscv/kvm/vcpu.c                      |  6 ++
+ arch/riscv/kvm/vcpu_xcvhtime.c             | 72 ++++++++++++++++++++++
+ 5 files changed, 111 insertions(+)
+ create mode 100644 arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
+ create mode 100644 arch/riscv/kvm/vcpu_xcvhtime.c
+
+diff --git a/arch/riscv/include/asm/kvm_host.h b/arch/riscv/include/asm/kvm_host.h
+index 97e42645c..f03cc2a53 100644
+--- a/arch/riscv/include/asm/kvm_host.h
++++ b/arch/riscv/include/asm/kvm_host.h
+@@ -24,6 +24,7 @@
+ #include <asm/kvm_vcpu_sbi.h>
+ #include <asm/kvm_vcpu_sbi_fwft.h>
+ #include <asm/kvm_vcpu_timer.h>
++#include <asm/kvm_vcpu_xcvhtime.h>
+ #include <asm/kvm_vcpu_pmu.h>
+ 
+ #define KVM_MAX_VCPUS			1024
+@@ -220,6 +221,9 @@ struct kvm_vcpu_arch {
+ 	/* VCPU Timer */
+ 	struct kvm_vcpu_timer timer;
+ 
++	/* VCPU hidden time (xcvhtime) context */
++	struct kvm_vcpu_xcvhtime xcvhtime;
++
+ 	/* HFENCE request queue */
+ 	spinlock_t hfence_lock;
+ 	unsigned long hfence_head;
+diff --git a/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h b/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
+new file mode 100644
+index 000000000..00f1c7f21
+--- /dev/null
++++ b/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * CORE-V hidden time (xcvhtime): per-vCPU state of the six hidden-time CSRs.
++ */
++
++#ifndef __KVM_VCPU_RISCV_XCVHTIME_H
++#define __KVM_VCPU_RISCV_XCVHTIME_H
++
++#include <linux/types.h>
++
++struct kvm_vcpu;
++
++struct kvm_vcpu_xcvhtime {
++	u64 htimectl;
++	u64 hexit_time;
++	u64 hhidden_time;
++	u64 hvtimecmp;
++	u64 hexit_cycle;
++	u64 hhidden_cycle;
++};
++
++void kvm_riscv_vcpu_xcvhtime_reset(struct kvm_vcpu *vcpu);
++void kvm_riscv_vcpu_xcvhtime_load(struct kvm_vcpu *vcpu);
++void kvm_riscv_vcpu_xcvhtime_put(struct kvm_vcpu *vcpu);
++void kvm_riscv_vcpu_xcvhtime_sync(struct kvm_vcpu *vcpu);
++u64 kvm_riscv_vcpu_xcvhtime_hidden(struct kvm_vcpu *vcpu);
++
++#endif
+diff --git a/arch/riscv/kvm/Makefile b/arch/riscv/kvm/Makefile
+index 296c2ba05..c0d8be896 100644
+--- a/arch/riscv/kvm/Makefile
++++ b/arch/riscv/kvm/Makefile
+@@ -40,5 +40,6 @@ kvm-$(CONFIG_RISCV_SBI_V01) += vcpu_sbi_v01.o
+ kvm-y += vcpu_switch.o
+ kvm-y += vcpu_timer.o
+ kvm-y += vcpu_vector.o
++kvm-y += vcpu_xcvhtime.o
+ kvm-y += vm.o
+ kvm-y += vmid.o
+diff --git a/arch/riscv/kvm/vcpu.c b/arch/riscv/kvm/vcpu.c
+index 61b302908..b4c279ecd 100644
+--- a/arch/riscv/kvm/vcpu.c
++++ b/arch/riscv/kvm/vcpu.c
+@@ -103,6 +103,8 @@ static void kvm_riscv_reset_vcpu(struct kvm_vcpu *vcpu, bool kvm_sbi_reset)
+ 
+ 	kvm_riscv_vcpu_timer_reset(vcpu);
+ 
++	kvm_riscv_vcpu_xcvhtime_reset(vcpu);
++
+ 	kvm_riscv_vcpu_aia_reset(vcpu);
+ 
+ 	raw_spin_lock_irqsave(&vcpu->arch.irqs_pending_lock, flags);
+@@ -415,6 +417,7 @@ void kvm_riscv_vcpu_sync_interrupts(struct kvm_vcpu *vcpu)
+ 	raw_spin_unlock_irqrestore(&v->irqs_pending_lock, flags);
+ 
+ 	/* Sync-up timer CSRs */
++	kvm_riscv_vcpu_xcvhtime_sync(vcpu);
+ 	kvm_riscv_vcpu_timer_sync(vcpu);
+ }
+ 
+@@ -625,6 +628,8 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
+ 	kvm_riscv_vcpu_aia_load(vcpu, cpu);
+ 
+ csr_restore_done:
++	/* Always restored: kvm_arch_vcpu_put() clears them */
++	kvm_riscv_vcpu_xcvhtime_load(vcpu);
+ 	kvm_riscv_vcpu_timer_restore(vcpu);
+ 
+ 	kvm_riscv_vcpu_host_fp_save(&vcpu->arch.host_context);
+@@ -652,6 +657,7 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+ 				     vcpu->arch.isa);
+ 	kvm_riscv_vcpu_host_fp_restore(&vcpu->arch.host_context);
+ 
++	kvm_riscv_vcpu_xcvhtime_put(vcpu);
+ 	kvm_riscv_vcpu_timer_save(vcpu);
+ 	kvm_riscv_vcpu_guest_vector_save(&vcpu->arch.guest_context,
+ 					 vcpu->arch.isa);
+diff --git a/arch/riscv/kvm/vcpu_xcvhtime.c b/arch/riscv/kvm/vcpu_xcvhtime.c
+new file mode 100644
+index 000000000..04301ddcf
+--- /dev/null
++++ b/arch/riscv/kvm/vcpu_xcvhtime.c
+@@ -0,0 +1,72 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * CORE-V hidden time (xcvhtime): VM-exit time hiding.
++ *
++ * The CSRs are saved and restored in-kernel only (no ONE_REG). HHAE is
++ * left at 0, so the guest clock only differs from time + htimedelta by
++ * whatever hhidden_time holds.
++ */
++
++#include <linux/kvm_host.h>
++#include <asm/csr.h>
++#include <asm/cpufeature.h>
++#include <asm/kvm_vcpu_xcvhtime.h>
++
++static bool xcvhtime_available(void)
++{
++	return riscv_has_extension_unlikely(RISCV_ISA_EXT_XCVHTIME);
++}
++
++void kvm_riscv_vcpu_xcvhtime_reset(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_xcvhtime *h = &vcpu->arch.xcvhtime;
++
++	memset(h, 0, sizeof(*h));
++	h->hvtimecmp = -1ULL;
++}
++
++void kvm_riscv_vcpu_xcvhtime_load(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_xcvhtime *h = &vcpu->arch.xcvhtime;
++
++	if (!xcvhtime_available())
++		return;
++
++	csr_write(CSR_HEXIT_TIME, h->hexit_time);
++	csr_write(CSR_HHIDDEN_TIME, h->hhidden_time);
++	csr_write(CSR_HVTIMECMP, h->hvtimecmp);
++	csr_write(CSR_HEXIT_CYCLE, h->hexit_cycle);
++	csr_write(CSR_HHIDDEN_CYCLE, h->hhidden_cycle);
++	csr_write(CSR_HTIMECTL, h->htimectl);
++}
++
++void kvm_riscv_vcpu_xcvhtime_put(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_xcvhtime *h = &vcpu->arch.xcvhtime;
++
++	if (!xcvhtime_available())
++		return;
++
++	h->htimectl = csr_read(CSR_HTIMECTL);
++	h->hexit_time = csr_read(CSR_HEXIT_TIME);
++	h->hhidden_time = csr_read(CSR_HHIDDEN_TIME);
++	h->hvtimecmp = csr_read(CSR_HVTIMECMP);
++	h->hexit_cycle = csr_read(CSR_HEXIT_CYCLE);
++	h->hhidden_cycle = csr_read(CSR_HHIDDEN_CYCLE);
++
++	/* Nothing hidden or armed while no vCPU is loaded */
++	csr_write(CSR_HTIMECTL, 0);
++	csr_write(CSR_HVTIMECMP, -1UL);
++}
++
++void kvm_riscv_vcpu_xcvhtime_sync(struct kvm_vcpu *vcpu)
++{
++	/* hhidden_time grows on each guest entry with HHAE=1 */
++	if (xcvhtime_available())
++		vcpu->arch.xcvhtime.hhidden_time = csr_read(CSR_HHIDDEN_TIME);
++}
++
++u64 kvm_riscv_vcpu_xcvhtime_hidden(struct kvm_vcpu *vcpu)
++{
++	return vcpu->arch.xcvhtime.hhidden_time;
++}
+-- 
+2.47.3
+
