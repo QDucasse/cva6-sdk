@@ -1,0 +1,167 @@
+From 9aa49c6bd145a6703332585e034f1e3aa97a1898 Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Mon, 12 Oct 2026 15:14:46 +0200
+Subject: [PATCH 5/6] target/riscv: xcvhtime, compare VSTIP against the hidden
+ guest clock
+
+Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+---
+ target/riscv/csr.c         | 12 ++++------
+ target/riscv/time_helper.c | 47 ++++++++++++++++++++++++++++++++++++--
+ target/riscv/time_helper.h |  1 +
+ target/riscv/xcv_csr.c     |  8 +++++++
+ 4 files changed, 58 insertions(+), 10 deletions(-)
+
+diff --git a/target/riscv/csr.c b/target/riscv/csr.c
+index 80a628de72..fb5ab08cb4 100644
+--- a/target/riscv/csr.c
++++ b/target/riscv/csr.c
+@@ -1701,8 +1701,7 @@ static RISCVException write_vstimecmp(CPURISCVState *env, int csrno,
+         env->vstimecmp = val;
+     }
+ 
+-    riscv_timer_write_timecmp(env, env->vstimer, env->vstimecmp,
+-                              env->htimedelta, MIP_VSTIP);
++    riscv_timer_update_vtimers(env);
+ 
+     return RISCV_EXCP_NONE;
+ }
+@@ -1711,8 +1710,7 @@ static RISCVException write_vstimecmph(CPURISCVState *env, int csrno,
+                                        target_ulong val, uintptr_t ra)
+ {
+     env->vstimecmp = deposit64(env->vstimecmp, 32, 32, (uint64_t)val);
+-    riscv_timer_write_timecmp(env, env->vstimer, env->vstimecmp,
+-                              env->htimedelta, MIP_VSTIP);
++    riscv_timer_update_vtimers(env);
+ 
+     return RISCV_EXCP_NONE;
+ }
+@@ -5008,8 +5006,7 @@ static RISCVException write_htimedelta(CPURISCVState *env, int csrno,
+     }
+ 
+     if (riscv_cpu_cfg(env)->ext_sstc && env->rdtime_fn) {
+-        riscv_timer_write_timecmp(env, env->vstimer, env->vstimecmp,
+-                                  env->htimedelta, MIP_VSTIP);
++        riscv_timer_update_vtimers(env);
+     }
+ 
+     return RISCV_EXCP_NONE;
+@@ -5036,8 +5033,7 @@ static RISCVException write_htimedeltah(CPURISCVState *env, int csrno,
+     env->htimedelta = deposit64(env->htimedelta, 32, 32, (uint64_t)val);
+ 
+     if (riscv_cpu_cfg(env)->ext_sstc && env->rdtime_fn) {
+-        riscv_timer_write_timecmp(env, env->vstimer, env->vstimecmp,
+-                                  env->htimedelta, MIP_VSTIP);
++        riscv_timer_update_vtimers(env);
+     }
+ 
+     return RISCV_EXCP_NONE;
+diff --git a/target/riscv/time_helper.c b/target/riscv/time_helper.c
+index b5ae5389ae..7448386763 100644
+--- a/target/riscv/time_helper.c
++++ b/target/riscv/time_helper.c
+@@ -181,8 +181,7 @@ static void riscv_timer_disable_timecmp(CPURISCVState *env, QEMUTimer *timer,
+ void riscv_timer_stce_changed(CPURISCVState *env, bool is_m_mode, bool enable)
+ {
+     if (enable) {
+-        riscv_timer_write_timecmp(env, env->vstimer, env->vstimecmp,
+-                                  env->htimedelta, MIP_VSTIP);
++        riscv_timer_update_vtimers(env);
+     } else {
+         riscv_timer_disable_timecmp(env, env->vstimer, MIP_VSTIP);
+     }
+@@ -211,3 +210,47 @@ void riscv_timer_init(RISCVCPU *cpu)
+     env->vstimer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &riscv_vstimer_cb, cpu);
+     env->vstimecmp = 0;
+ }
++
++static bool riscv_vstimer_enabled(CPURISCVState *env)
++{
++    return riscv_cpu_cfg(env)->ext_sstc && env->rdtime_fn &&
++           env->rdtime_fn_arg && get_field(env->menvcfg, MENVCFG_STCE) &&
++           riscv_has_ext(env, RVH) && get_field(env->henvcfg, HENVCFG_STCE);
++}
++
++/*
++ * Recompute VSTIP from the current state and re-arm the host timer, which is
++ * only a wake-up. Called whenever vtime_eff or vstimecmp changes.
++ *
++ *   vtime     = mtime + htimedelta - hhidden_time
++ *   vtime_eff = (V == 0 && HHAE) ? hexit_time + htimedelta - hhidden_time
++ *                                : vtime
++ */
++void riscv_timer_update_vtimers(CPURISCVState *env)
++{
++    uint64_t delta = env->htimedelta;
++    uint64_t vtime;
++
++    if (!riscv_cpu_cfg(env)->ext_xcvhtime) {
++        riscv_timer_write_timecmp(env, env->vstimer, env->vstimecmp,
++                                  delta, MIP_VSTIP);
++        return;
++    }
++
++    delta -= env->hhidden_time;
++
++    if (env->virt_enabled || !(env->htimectl & XCV_HTIMECTL_HHAE)) {
++        /* live */
++        riscv_timer_write_timecmp(env, env->vstimer, env->vstimecmp,
++                                  delta, MIP_VSTIP);
++        return;
++    }
++
++    /* frozen: guest time stops at the exit point, no wake-up */
++    timer_del(env->vstimer);
++    vtime = env->hexit_time + delta;
++    if (riscv_vstimer_enabled(env)) {
++        env->vstime_irq = env->vstimecmp <= vtime;
++    }
++    riscv_cpu_update_mip(env, 0, 0);
++}
+diff --git a/target/riscv/time_helper.h b/target/riscv/time_helper.h
+index af1f634f89..1d8f06c0d5 100644
+--- a/target/riscv/time_helper.h
++++ b/target/riscv/time_helper.h
+@@ -27,5 +27,6 @@ void riscv_timer_write_timecmp(CPURISCVState *env, QEMUTimer *timer,
+                                uint32_t timer_irq);
+ void riscv_timer_stce_changed(CPURISCVState *env, bool is_m_mode, bool enable);
+ void riscv_timer_init(RISCVCPU *cpu);
++void riscv_timer_update_vtimers(CPURISCVState *env);
+ 
+ #endif
+diff --git a/target/riscv/xcv_csr.c b/target/riscv/xcv_csr.c
+index eb0d2caad8..93c2e9a6a5 100644
+--- a/target/riscv/xcv_csr.c
++++ b/target/riscv/xcv_csr.c
+@@ -10,6 +10,7 @@
+ #include "qemu/osdep.h"
+ #include "cpu.h"
+ #include "pmu.h"
++#include "time_helper.h"
+ 
+ static uint64_t xcv_mtime(CPURISCVState *env)
+ {
+@@ -38,6 +39,8 @@ void riscv_xcvhtime_virt_changed(CPURISCVState *env, bool virt_en)
+         env->hhidden_time += xcv_mtime(env) - env->hexit_time;
+         env->hhidden_cycle += xcv_mcycle(env) - env->hexit_cycle;
+     }
++
++    riscv_timer_update_vtimers(env);
+ }
+ 
+ /*
+@@ -88,6 +91,11 @@ static RISCVException write_xcv(CPURISCVState *env, int csrno,
+     }
+     *xcv_csr_ptr(env, csrno) = val;
+ 
++    /* The cycle CSRs feed no comparator */
++    if (csrno != CSR_XCV_HEXIT_CYCLE && csrno != CSR_XCV_HHIDDEN_CYCLE) {
++        riscv_timer_update_vtimers(env);
++    }
++
+     return RISCV_EXCP_NONE;
+ }
+ 
+-- 
+2.47.3
+

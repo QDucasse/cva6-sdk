@@ -1,0 +1,65 @@
+From d87c458aec31b471dcd6770ee20573aa75112bd8 Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Mon, 12 Oct 2026 15:00:16 +0200
+Subject: [PATCH 1/6] target/riscv: add the xcvhtime CPU property, off by
+ default
+
+Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+---
+ target/riscv/cpu.c                | 2 ++
+ target/riscv/cpu_cfg_fields.h.inc | 1 +
+ target/riscv/tcg/tcg-cpu.c        | 6 ++++++
+ 3 files changed, 9 insertions(+)
+
+diff --git a/target/riscv/cpu.c b/target/riscv/cpu.c
+index 73d4280d7c..4ef954e870 100644
+--- a/target/riscv/cpu.c
++++ b/target/riscv/cpu.c
+@@ -233,6 +233,7 @@ const RISCVIsaExtData isa_edata_arr[] = {
+     ISA_EXT_DATA_ENTRY(svrsw60t59b, PRIV_VERSION_1_13_0, ext_svrsw60t59b),
+     ISA_EXT_DATA_ENTRY(svukte, PRIV_VERSION_1_13_0, ext_svukte),
+     ISA_EXT_DATA_ENTRY(svvptc, PRIV_VERSION_1_13_0, ext_svvptc),
++    ISA_EXT_DATA_ENTRY(xcvhtime, PRIV_VERSION_1_12_0, ext_xcvhtime),
+     ISA_EXT_DATA_ENTRY(xtheadba, PRIV_VERSION_1_11_0, ext_xtheadba),
+     ISA_EXT_DATA_ENTRY(xtheadbb, PRIV_VERSION_1_11_0, ext_xtheadbb),
+     ISA_EXT_DATA_ENTRY(xtheadbs, PRIV_VERSION_1_11_0, ext_xtheadbs),
+@@ -1354,6 +1355,7 @@ const RISCVCPUMultiExtConfig riscv_cpu_extensions[] = {
+ };
+ 
+ const RISCVCPUMultiExtConfig riscv_cpu_vendor_exts[] = {
++    MULTI_EXT_CFG_BOOL("xcvhtime", ext_xcvhtime, false),
+     MULTI_EXT_CFG_BOOL("xtheadba", ext_xtheadba, false),
+     MULTI_EXT_CFG_BOOL("xtheadbb", ext_xtheadbb, false),
+     MULTI_EXT_CFG_BOOL("xtheadbs", ext_xtheadbs, false),
+diff --git a/target/riscv/cpu_cfg_fields.h.inc b/target/riscv/cpu_cfg_fields.h.inc
+index a154ecdc79..67d74406ac 100644
+--- a/target/riscv/cpu_cfg_fields.h.inc
++++ b/target/riscv/cpu_cfg_fields.h.inc
+@@ -135,6 +135,7 @@ BOOL_FIELD(has_priv_1_11)
+ BOOL_FIELD(ext_ziccrse)
+ 
+ /* Vendor-specific custom extensions */
++BOOL_FIELD(ext_xcvhtime)
+ BOOL_FIELD(ext_xtheadba)
+ BOOL_FIELD(ext_xtheadbb)
+ BOOL_FIELD(ext_xtheadbs)
+diff --git a/target/riscv/tcg/tcg-cpu.c b/target/riscv/tcg/tcg-cpu.c
+index d3968251fa..e815ad0876 100644
+--- a/target/riscv/tcg/tcg-cpu.c
++++ b/target/riscv/tcg/tcg-cpu.c
+@@ -620,6 +620,12 @@ void riscv_cpu_validate_set_extensions(RISCVCPU *cpu, Error **errp)
+         return;
+     }
+ 
++    if (cpu->cfg.ext_xcvhtime &&
++        (!riscv_has_ext(env, RVH) || mcc->def->misa_mxl_max != MXL_RV64)) {
++        error_setg(errp, "xcvhtime requires RV64 and the H extension");
++        return;
++    }
++
+     if (!riscv_has_ext(env, RVI) && !riscv_has_ext(env, RVE)) {
+         error_setg(errp,
+                    "Either I or E extension must be set");
+-- 
+2.47.3
+

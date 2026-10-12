@@ -1,0 +1,231 @@
+From 622d4bbceadf11e529c076761256b14f1c79b968 Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Mon, 12 Oct 2026 15:25:28 +0200
+Subject: [PATCH 6/6] target/riscv: xcvhtime, add the hvtimecmp interrupt 24
+
+Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+---
+ target/riscv/cpu.c         |  9 ++++++++
+ target/riscv/cpu.h         |  2 ++
+ target/riscv/cpu_bits.h    |  2 ++
+ target/riscv/cpu_helper.c  |  6 ++++-
+ target/riscv/csr.c         | 13 +++++++++++
+ target/riscv/time_helper.c | 45 +++++++++++++++++++++++++++++++++++---
+ 6 files changed, 73 insertions(+), 4 deletions(-)
+
+diff --git a/target/riscv/cpu.c b/target/riscv/cpu.c
+index e60b452218..11c88db30b 100644
+--- a/target/riscv/cpu.c
++++ b/target/riscv/cpu.c
+@@ -21,6 +21,7 @@
+ #include "qemu/qemu-print.h"
+ #include "qemu/ctype.h"
+ #include "qemu/log.h"
++#include "qemu/timer.h"
+ #include "cpu.h"
+ #include "cpu_vendorid.h"
+ #include "internals.h"
+@@ -754,12 +755,20 @@ static void riscv_cpu_reset_hold(Object *obj, ResetType type)
+         env->mideleg |= HS_MODE_INTERRUPTS;
+     }
+ 
++    /* xcvhtime: mideleg[24] is read-only 1 */
+     env->htimectl = 0;
+     env->hexit_time = 0;
+     env->hhidden_time = 0;
+     env->hvtimecmp = 0;
+     env->hexit_cycle = 0;
+     env->hhidden_cycle = 0;
++    env->hvti_irq = false;
++    if (env->hvtimer) {
++        timer_del(env->hvtimer);
++    }
++    if (cpu->cfg.ext_xcvhtime) {
++        env->mideleg |= MIP_XCV_HVTI;
++    }
+ 
+     /*
+      * Clear mseccfg and unlock all the PMP entries upon reset.
+diff --git a/target/riscv/cpu.h b/target/riscv/cpu.h
+index a9b78e7547..6d3fdbeeda 100644
+--- a/target/riscv/cpu.h
++++ b/target/riscv/cpu.h
+@@ -501,6 +501,8 @@ struct CPUArchState {
+     QEMUTimer *stimer; /* Internal timer for S-mode interrupt */
+     QEMUTimer *vstimer; /* Internal timer for VS-mode interrupt */
+     bool vstime_irq;
++    QEMUTimer *hvtimer; /* xcvhtime: internal timer for hvtimecmp */
++    bool hvti_irq;
+ 
+     hwaddr kernel_addr;
+     hwaddr fdt_addr;
+diff --git a/target/riscv/cpu_bits.h b/target/riscv/cpu_bits.h
+index fd198a0bc7..8f23309727 100644
+--- a/target/riscv/cpu_bits.h
++++ b/target/riscv/cpu_bits.h
+@@ -817,6 +817,7 @@ typedef enum RISCVException {
+ #define IRQ_M_EXT                          11
+ #define IRQ_S_GEXT                         12
+ #define IRQ_PMU_OVF                        13
++#define IRQ_XCV_HVTI                       24
+ #define IRQ_LOCAL_MAX                      64
+ /* -1 is due to bit zero of hgeip and hgeie being ROZ. */
+ #define IRQ_LOCAL_GUEST_MAX                (TARGET_LONG_BITS - 1)
+@@ -839,6 +840,7 @@ typedef enum RISCVException {
+ #define MIP_MEIP                           (1 << IRQ_M_EXT)
+ #define MIP_SGEIP                          (1 << IRQ_S_GEXT)
+ #define MIP_LCOFIP                         (1 << IRQ_PMU_OVF)
++#define MIP_XCV_HVTI                       (1ULL << IRQ_XCV_HVTI)
+ 
+ /* sip masks */
+ #define SIP_SSIP                           MIP_SSIP
+diff --git a/target/riscv/cpu_helper.c b/target/riscv/cpu_helper.c
+index 3486afed35..199cf50791 100644
+--- a/target/riscv/cpu_helper.c
++++ b/target/riscv/cpu_helper.c
+@@ -429,8 +429,9 @@ uint64_t riscv_cpu_all_pending(CPURISCVState *env)
+     uint32_t gein = get_field(env->hstatus, HSTATUS_VGEIN);
+     uint64_t vsgein = (env->hgeip & (1ULL << gein)) ? MIP_VSEIP : 0;
+     uint64_t vstip = (env->vstime_irq) ? MIP_VSTIP : 0;
++    uint64_t hvti = (env->virt_enabled && env->hvti_irq) ? MIP_XCV_HVTI : 0;
+ 
+-    return (env->mip | vsgein | vstip) & env->mie;
++    return (env->mip | vsgein | vstip | hvti) & env->mie;
+ }
+ 
+ int riscv_cpu_mirq_pending(CPURISCVState *env)
+@@ -735,6 +736,9 @@ void riscv_cpu_interrupt(CPURISCVState *env)
+     }
+ 
+     vstip = env->vstime_irq ? MIP_VSTIP : 0;
++    if (env->virt_enabled && env->hvti_irq) {
++        irqf |= MIP_XCV_HVTI;
++    }
+ 
+     if (env->mip | vsgein | vstip | irqf) {
+         cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+diff --git a/target/riscv/csr.c b/target/riscv/csr.c
+index fb5ab08cb4..a7ed71b9f2 100644
+--- a/target/riscv/csr.c
++++ b/target/riscv/csr.c
+@@ -2226,6 +2226,10 @@ static RISCVException rmw_mideleg64(CPURISCVState *env, int csrno,
+         env->mideleg |= HS_MODE_INTERRUPTS;
+     }
+ 
++    if (riscv_cpu_cfg(env)->ext_xcvhtime) {
++        env->mideleg |= MIP_XCV_HVTI;
++    }
++
+     return RISCV_EXCP_NONE;
+ }
+ 
+@@ -2277,6 +2281,10 @@ static RISCVException rmw_mie64(CPURISCVState *env, int csrno,
+         env->mie &= ~((uint64_t)HS_MODE_INTERRUPTS);
+     }
+ 
++    if (!riscv_cpu_cfg(env)->ext_xcvhtime) {
++        env->mie &= ~MIP_XCV_HVTI;
++    }
++
+     return RISCV_EXCP_NONE;
+ }
+ 
+@@ -4706,6 +4714,11 @@ static RISCVException rmw_hideleg64(CPURISCVState *env, int csrno,
+     }
+ 
+     env->hideleg = (env->hideleg & ~mask) | (new_val & mask);
++
++    /* xcvhtime: interrupt 24 is always taken in HS */
++    if (riscv_cpu_cfg(env)->ext_xcvhtime) {
++        env->hideleg &= ~MIP_XCV_HVTI;
++    }
+     return RISCV_EXCP_NONE;
+ }
+ 
+diff --git a/target/riscv/time_helper.c b/target/riscv/time_helper.c
+index 7448386763..49caf66fb4 100644
+--- a/target/riscv/time_helper.c
++++ b/target/riscv/time_helper.c
+@@ -33,6 +33,14 @@ static void riscv_vstimer_cb(void *opaque)
+ static void riscv_timer_arm(QEMUTimer *timer, uint64_t diff,
+                             uint32_t timebase_freq);
+ 
++static void riscv_hvtimer_cb(void *opaque)
++{
++    RISCVCPU *cpu = opaque;
++    CPURISCVState *env = &cpu->env;
++    env->hvti_irq = 1;
++    riscv_cpu_update_mip(env, 0, BOOL_TO_MASK(1));
++}
++
+ static void riscv_stimer_cb(void *opaque)
+ {
+     RISCVCPU *cpu = opaque;
+@@ -209,6 +217,8 @@ void riscv_timer_init(RISCVCPU *cpu)
+ 
+     env->vstimer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &riscv_vstimer_cb, cpu);
+     env->vstimecmp = 0;
++
++    env->hvtimer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &riscv_hvtimer_cb, cpu);
+ }
+ 
+ static bool riscv_vstimer_enabled(CPURISCVState *env)
+@@ -219,8 +229,34 @@ static bool riscv_vstimer_enabled(CPURISCVState *env)
+ }
+ 
+ /*
+- * Recompute VSTIP from the current state and re-arm the host timer, which is
+- * only a wake-up. Called whenever vtime_eff or vstimecmp changes.
++ * Live hvtimecmp comparator: same as riscv_timer_write_timecmp() without
++ * the Sstc/STCE gating.
++ */
++static void riscv_hvtimer_write(CPURISCVState *env, uint64_t delta)
++{
++    RISCVAclintMTimerState *mtimer = env->rdtime_fn_arg;
++    uint64_t vtime;
++
++    if (!env->rdtime_fn || !env->rdtime_fn_arg) {
++        return;
++    }
++
++    vtime = env->rdtime_fn(env->rdtime_fn_arg) + delta;
++    env->hvti_irq = env->hvtimecmp <= vtime;
++    riscv_cpu_update_mip(env, 0, 0);
++
++    if (env->hvti_irq || env->hvtimecmp == UINT64_MAX) {
++        timer_del(env->hvtimer);
++        return;
++    }
++    riscv_timer_arm(env->hvtimer, env->hvtimecmp - vtime,
++                    mtimer->timebase_freq);
++}
++
++/*
++ * Recompute VSTIP and the hvtimecmp level from the current state and re-arm
++ * the host timers, which are only wake-ups. Called whenever vtime_eff or a
++ * comparand changes.
+  *
+  *   vtime     = mtime + htimedelta - hhidden_time
+  *   vtime_eff = (V == 0 && HHAE) ? hexit_time + htimedelta - hhidden_time
+@@ -243,14 +279,17 @@ void riscv_timer_update_vtimers(CPURISCVState *env)
+         /* live */
+         riscv_timer_write_timecmp(env, env->vstimer, env->vstimecmp,
+                                   delta, MIP_VSTIP);
++        riscv_hvtimer_write(env, delta);
+         return;
+     }
+ 
+-    /* frozen: guest time stops at the exit point, no wake-up */
++    /* frozen: guest time stops at the exit point, no wake-ups */
+     timer_del(env->vstimer);
++    timer_del(env->hvtimer);
+     vtime = env->hexit_time + delta;
+     if (riscv_vstimer_enabled(env)) {
+         env->vstime_irq = env->vstimecmp <= vtime;
+     }
++    env->hvti_irq = env->hvtimecmp <= vtime;
+     riscv_cpu_update_mip(env, 0, 0);
+ }
+-- 
+2.47.3
+

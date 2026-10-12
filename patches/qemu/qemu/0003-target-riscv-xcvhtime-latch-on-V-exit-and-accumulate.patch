@@ -1,0 +1,144 @@
+From 617d73e57e73b3031d3cd97d0579ea5c082cf0bc Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Mon, 12 Oct 2026 15:07:33 +0200
+Subject: [PATCH 3/6] target/riscv: xcvhtime, latch on V exit and accumulate on
+ V entry
+
+Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+---
+ target/riscv/cpu.h        |  1 +
+ target/riscv/cpu_helper.c |  7 ++++++-
+ target/riscv/csr.c        | 23 +++++++++++++++++++++--
+ target/riscv/xcv_csr.c    | 30 ++++++++++++++++++++++++++++++
+ 4 files changed, 58 insertions(+), 3 deletions(-)
+
+diff --git a/target/riscv/cpu.h b/target/riscv/cpu.h
+index 30c465fc03..a9b78e7547 100644
+--- a/target/riscv/cpu.h
++++ b/target/riscv/cpu.h
+@@ -995,6 +995,7 @@ extern const RISCVCSR th_csr_list[];
+ 
+ /* In xcv_csr.c */
+ extern const RISCVCSR xcv_csr_list[];
++void riscv_xcvhtime_virt_changed(CPURISCVState *env, bool virt_en);
+ 
+ const char *priv_spec_to_str(int priv_version);
+ #endif /* RISCV_CPU_H */
+diff --git a/target/riscv/cpu_helper.c b/target/riscv/cpu_helper.c
+index c4fb68b5de..3486afed35 100644
+--- a/target/riscv/cpu_helper.c
++++ b/target/riscv/cpu_helper.c
+@@ -1055,12 +1055,17 @@ void riscv_cpu_set_mode(CPURISCVState *env, target_ulong newpriv, bool virt_en)
+     env->load_res = -1;
+ 
+     if (riscv_has_ext(env, RVH)) {
++        bool virt_changed = env->virt_enabled != virt_en;
++
+         /* Flush the TLB on all virt mode changes. */
+-        if (env->virt_enabled != virt_en) {
++        if (virt_changed) {
+             tlb_flush(env_cpu(env));
+         }
+ 
+         env->virt_enabled = virt_en;
++        if (virt_changed && riscv_cpu_cfg(env)->ext_xcvhtime) {
++            riscv_xcvhtime_virt_changed(env, virt_en);
++        }
+         if (virt_en) {
+             /*
+              * The guest external interrupts from an interrupt controller are
+diff --git a/target/riscv/csr.c b/target/riscv/csr.c
+index 5c91658c3d..80a628de72 100644
+--- a/target/riscv/csr.c
++++ b/target/riscv/csr.c
+@@ -1416,6 +1416,14 @@ static RISCVException read_hpmcounter(CPURISCVState *env, int csrno,
+         return RISCV_EXCP_ILLEGAL_INST;
+     }
+ 
++    if (csrno == CSR_CYCLE && env->virt_enabled &&
++        riscv_cpu_cfg(env)->ext_xcvhtime) {
++        /* vcycle = mcycle - hhidden_cycle */
++        riscv_pmu_read_ctr(env, val, false, ctr_index);
++        *val -= env->hhidden_cycle;
++        return RISCV_EXCP_NONE;
++    }
++
+     return riscv_pmu_read_ctr(env, val, false, ctr_index);
+ }
+ 
+@@ -1631,10 +1639,21 @@ static RISCVException read_scountovf(CPURISCVState *env, int csrno,
+     return RISCV_EXCP_NONE;
+ }
+ 
++static uint64_t riscv_time_delta(CPURISCVState *env)
++{
++    if (!env->virt_enabled) {
++        return 0;
++    }
++    if (riscv_cpu_cfg(env)->ext_xcvhtime) {
++        return env->htimedelta - env->hhidden_time;
++    }
++    return env->htimedelta;
++}
++
+ static RISCVException read_time(CPURISCVState *env, int csrno,
+                                 target_ulong *val)
+ {
+-    uint64_t delta = env->virt_enabled ? env->htimedelta : 0;
++    uint64_t delta = riscv_time_delta(env);
+ 
+     if (!env->rdtime_fn) {
+         return RISCV_EXCP_ILLEGAL_INST;
+@@ -1647,7 +1666,7 @@ static RISCVException read_time(CPURISCVState *env, int csrno,
+ static RISCVException read_timeh(CPURISCVState *env, int csrno,
+                                  target_ulong *val)
+ {
+-    uint64_t delta = env->virt_enabled ? env->htimedelta : 0;
++    uint64_t delta = riscv_time_delta(env);
+ 
+     if (!env->rdtime_fn) {
+         return RISCV_EXCP_ILLEGAL_INST;
+diff --git a/target/riscv/xcv_csr.c b/target/riscv/xcv_csr.c
+index 84c0ddc793..eb0d2caad8 100644
+--- a/target/riscv/xcv_csr.c
++++ b/target/riscv/xcv_csr.c
+@@ -9,6 +9,36 @@
+ 
+ #include "qemu/osdep.h"
+ #include "cpu.h"
++#include "pmu.h"
++
++static uint64_t xcv_mtime(CPURISCVState *env)
++{
++    return env->rdtime_fn ? env->rdtime_fn(env->rdtime_fn_arg) : 0;
++}
++
++static uint64_t xcv_mcycle(CPURISCVState *env)
++{
++    target_ulong val;
++
++    riscv_pmu_read_ctr(env, &val, false, 0);
++    return val;
++}
++
++/*
++ * Called after every V change. Latch on V 1->0 whatever the target mode;
++ * accumulate on V 0->1 if HHAE. Nested transitions (V->HS->M->HS->V) only
++ * see the V edges.
++ */
++void riscv_xcvhtime_virt_changed(CPURISCVState *env, bool virt_en)
++{
++    if (!virt_en) {
++        env->hexit_time = xcv_mtime(env);
++        env->hexit_cycle = xcv_mcycle(env);
++    } else if (env->htimectl & XCV_HTIMECTL_HHAE) {
++        env->hhidden_time += xcv_mtime(env) - env->hexit_time;
++        env->hhidden_cycle += xcv_mcycle(env) - env->hexit_cycle;
++    }
++}
+ 
+ /*
+  * The generic CSR check derives the access rules from the H-level address:
+-- 
+2.47.3
+

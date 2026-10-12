@@ -1,0 +1,186 @@
+From 55caad4c7e8809baf5aabd95a1783782827beed0 Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Mon, 12 Oct 2026 15:06:29 +0200
+Subject: [PATCH 2/6] target/riscv: add the xcvhtime CSRs
+
+Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+---
+ target/riscv/cpu.c       |  9 +++++
+ target/riscv/cpu.h       | 11 ++++++
+ target/riscv/cpu_bits.h  |  9 +++++
+ target/riscv/meson.build |  1 +
+ target/riscv/xcv_csr.c   | 75 ++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 105 insertions(+)
+ create mode 100644 target/riscv/xcv_csr.c
+
+diff --git a/target/riscv/cpu.c b/target/riscv/cpu.c
+index 4ef954e870..e60b452218 100644
+--- a/target/riscv/cpu.c
++++ b/target/riscv/cpu.c
+@@ -754,6 +754,13 @@ static void riscv_cpu_reset_hold(Object *obj, ResetType type)
+         env->mideleg |= HS_MODE_INTERRUPTS;
+     }
+ 
++    env->htimectl = 0;
++    env->hexit_time = 0;
++    env->hhidden_time = 0;
++    env->hvtimecmp = 0;
++    env->hexit_cycle = 0;
++    env->hhidden_cycle = 0;
++
+     /*
+      * Clear mseccfg and unlock all the PMP entries upon reset.
+      * This is allowed as per the priv and smepmp specifications
+@@ -1143,6 +1150,8 @@ static void riscv_cpu_init(Object *obj)
+     if (mcc->def->custom_csrs) {
+         riscv_register_custom_csrs(cpu, mcc->def->custom_csrs);
+     }
++    /* Properties are not parsed yet: the predicate checks ext_xcvhtime */
++    riscv_register_custom_csrs(cpu, xcv_csr_list);
+ #endif
+ 
+     accel_cpu_instance_init(CPU(obj));
+diff --git a/target/riscv/cpu.h b/target/riscv/cpu.h
+index 36e7f10037..30c465fc03 100644
+--- a/target/riscv/cpu.h
++++ b/target/riscv/cpu.h
+@@ -359,6 +359,14 @@ struct CPUArchState {
+     uint64_t htimedelta;
+     uint64_t hvien;
+ 
++    /* xcvhtime */
++    uint64_t htimectl;
++    uint64_t hexit_time;
++    uint64_t hhidden_time;
++    uint64_t hvtimecmp;
++    uint64_t hexit_cycle;
++    uint64_t hhidden_cycle;
++
+     /*
+      * Bits VSSIP, VSTIP and VSEIP in hvip are maintained in mip. Other bits
+      * from 0:12 are reserved. Bits 13:63 are not aliased and must be separately
+@@ -985,5 +993,8 @@ const char *satp_mode_str(uint8_t satp_mode, bool is_32_bit);
+ /* In th_csr.c */
+ extern const RISCVCSR th_csr_list[];
+ 
++/* In xcv_csr.c */
++extern const RISCVCSR xcv_csr_list[];
++
+ const char *priv_spec_to_str(int priv_version);
+ #endif /* RISCV_CPU_H */
+diff --git a/target/riscv/cpu_bits.h b/target/riscv/cpu_bits.h
+index b62dd82fe7..fd198a0bc7 100644
+--- a/target/riscv/cpu_bits.h
++++ b/target/riscv/cpu_bits.h
+@@ -274,6 +274,15 @@
+ #define CSR_HTIMEDELTA      0x605
+ #define CSR_HTIMEDELTAH     0x615
+ 
++/* CORE-V hidden time (xcvhtime), RV64 only */
++#define CSR_XCV_HTIMECTL        0x6C0
++#define CSR_XCV_HEXIT_TIME      0x6C1
++#define CSR_XCV_HHIDDEN_TIME    0x6C2
++#define CSR_XCV_HVTIMECMP       0x6C3
++#define CSR_XCV_HEXIT_CYCLE     0x6C4
++#define CSR_XCV_HHIDDEN_CYCLE   0x6C5
++#define XCV_HTIMECTL_HHAE       BIT(0)
++
+ /* Hypervisor Configuration CSRs */
+ #define CSR_HENVCFG         0x60A
+ #define CSR_HENVCFGH        0x61A
+diff --git a/target/riscv/meson.build b/target/riscv/meson.build
+index fdefe88ccd..d1f6586005 100644
+--- a/target/riscv/meson.build
++++ b/target/riscv/meson.build
+@@ -38,6 +38,7 @@ riscv_system_ss.add(files(
+   'machine.c',
+   'pmu.c',
+   'th_csr.c',
++  'xcv_csr.c',
+   'time_helper.c',
+   'riscv-qmp-cmds.c',
+ ))
+diff --git a/target/riscv/xcv_csr.c b/target/riscv/xcv_csr.c
+new file mode 100644
+index 0000000000..84c0ddc793
+--- /dev/null
++++ b/target/riscv/xcv_csr.c
+@@ -0,0 +1,75 @@
++/*
++ * CORE-V hidden-time CSRs (xcvhtime).
++ *
++ * Software-visible model of the CVA6 hidden-time extension: guest time and
++ * cycle stop while the hart runs with V=0, if htimectl.HHAE=1.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "cpu.h"
++
++/*
++ * The generic CSR check derives the access rules from the H-level address:
++ * VS/VU raise a virtual-instruction fault, U an illegal instruction.
++ */
++static RISCVException xcvhtime(CPURISCVState *env, int csrno)
++{
++    if (riscv_cpu_cfg(env)->ext_xcvhtime) {
++        return RISCV_EXCP_NONE;
++    }
++
++    return RISCV_EXCP_ILLEGAL_INST;
++}
++
++static uint64_t *xcv_csr_ptr(CPURISCVState *env, int csrno)
++{
++    switch (csrno) {
++    case CSR_XCV_HTIMECTL:
++        return &env->htimectl;
++    case CSR_XCV_HEXIT_TIME:
++        return &env->hexit_time;
++    case CSR_XCV_HHIDDEN_TIME:
++        return &env->hhidden_time;
++    case CSR_XCV_HVTIMECMP:
++        return &env->hvtimecmp;
++    case CSR_XCV_HEXIT_CYCLE:
++        return &env->hexit_cycle;
++    case CSR_XCV_HHIDDEN_CYCLE:
++        return &env->hhidden_cycle;
++    default:
++        g_assert_not_reached();
++    }
++}
++
++static RISCVException read_xcv(CPURISCVState *env, int csrno,
++                               target_ulong *val)
++{
++    *val = *xcv_csr_ptr(env, csrno);
++    return RISCV_EXCP_NONE;
++}
++
++static RISCVException write_xcv(CPURISCVState *env, int csrno,
++                                target_ulong val, uintptr_t ra)
++{
++    if (csrno == CSR_XCV_HTIMECTL) {
++        val &= XCV_HTIMECTL_HHAE;
++    }
++    *xcv_csr_ptr(env, csrno) = val;
++
++    return RISCV_EXCP_NONE;
++}
++
++#define XCV_CSR(no, name) \
++    { .csrno = no, .csr_ops = { name, xcvhtime, read_xcv, write_xcv } }
++
++const RISCVCSR xcv_csr_list[] = {
++    XCV_CSR(CSR_XCV_HTIMECTL, "htimectl"),
++    XCV_CSR(CSR_XCV_HEXIT_TIME, "hexit_time"),
++    XCV_CSR(CSR_XCV_HHIDDEN_TIME, "hhidden_time"),
++    XCV_CSR(CSR_XCV_HVTIMECMP, "hvtimecmp"),
++    XCV_CSR(CSR_XCV_HEXIT_CYCLE, "hexit_cycle"),
++    XCV_CSR(CSR_XCV_HHIDDEN_CYCLE, "hhidden_cycle"),
++    { }
++};
+-- 
+2.47.3
+
