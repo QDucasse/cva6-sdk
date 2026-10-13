@@ -1,7 +1,7 @@
 From 617d73e57e73b3031d3cd97d0579ea5c082cf0bc Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 15:07:33 +0200
-Subject: [PATCH 3/6] target/riscv: xcvhtime, latch on V exit and accumulate on
+Subject: [PATCH 3/7] target/riscv: xcvhtime, latch on V exit and accumulate on
  V entry
 
 Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>

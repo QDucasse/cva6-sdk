@@ -1,7 +1,7 @@
 From 622d4bbceadf11e529c076761256b14f1c79b968 Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 15:25:28 +0200
-Subject: [PATCH 6/6] target/riscv: xcvhtime, add the hvtimecmp interrupt 24
+Subject: [PATCH 6/7] target/riscv: xcvhtime, add the hvtimecmp interrupt 24
 
 Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 ---

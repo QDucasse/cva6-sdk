@@ -1,0 +1,150 @@
+From 580c0e3248b3d1918d2bf32ad3174032a23f3b19 Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Tue, 13 Oct 2026 16:37:04 +0200
+Subject: [PATCH 7/7] target/riscv: xcvhtime, hide instret like cycle or time
+
+Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+---
+ target/riscv/cpu.c      |  2 ++
+ target/riscv/cpu.h      |  2 ++
+ target/riscv/cpu_bits.h |  2 ++
+ target/riscv/csr.c      |  9 ++++++---
+ target/riscv/xcv_csr.c  | 24 +++++++++++++++++++++---
+ 5 files changed, 33 insertions(+), 6 deletions(-)
+
+diff --git a/target/riscv/cpu.c b/target/riscv/cpu.c
+index 11c88db30b..bdf8eead19 100644
+--- a/target/riscv/cpu.c
++++ b/target/riscv/cpu.c
+@@ -762,6 +762,8 @@ static void riscv_cpu_reset_hold(Object *obj, ResetType type)
+     env->hvtimecmp = 0;
+     env->hexit_cycle = 0;
+     env->hhidden_cycle = 0;
++    env->hexit_instret = 0;
++    env->hhidden_instret = 0;
+     env->hvti_irq = false;
+     if (env->hvtimer) {
+         timer_del(env->hvtimer);
+diff --git a/target/riscv/cpu.h b/target/riscv/cpu.h
+index 6d3fdbeeda..c2f8b1aeab 100644
+--- a/target/riscv/cpu.h
++++ b/target/riscv/cpu.h
+@@ -366,6 +366,8 @@ struct CPUArchState {
+     uint64_t hvtimecmp;
+     uint64_t hexit_cycle;
+     uint64_t hhidden_cycle;
++    uint64_t hexit_instret;
++    uint64_t hhidden_instret;
+ 
+     /*
+      * Bits VSSIP, VSTIP and VSEIP in hvip are maintained in mip. Other bits
+diff --git a/target/riscv/cpu_bits.h b/target/riscv/cpu_bits.h
+index 8f23309727..4bf83a6db6 100644
+--- a/target/riscv/cpu_bits.h
++++ b/target/riscv/cpu_bits.h
+@@ -281,6 +281,8 @@
+ #define CSR_XCV_HVTIMECMP       0x6C3
+ #define CSR_XCV_HEXIT_CYCLE     0x6C4
+ #define CSR_XCV_HHIDDEN_CYCLE   0x6C5
++#define CSR_XCV_HEXIT_INSTRET   0x6C6
++#define CSR_XCV_HHIDDEN_INSTRET 0x6C7
+ #define XCV_HTIMECTL_HHAE       BIT(0)
+ 
+ /* Hypervisor Configuration CSRs */
+diff --git a/target/riscv/csr.c b/target/riscv/csr.c
+index a7ed71b9f2..0563880319 100644
+--- a/target/riscv/csr.c
++++ b/target/riscv/csr.c
+@@ -1416,11 +1416,14 @@ static RISCVException read_hpmcounter(CPURISCVState *env, int csrno,
+         return RISCV_EXCP_ILLEGAL_INST;
+     }
+ 
+-    if (csrno == CSR_CYCLE && env->virt_enabled &&
++    if ((csrno == CSR_CYCLE || csrno == CSR_INSTRET) && env->virt_enabled &&
+         riscv_cpu_cfg(env)->ext_xcvhtime) {
+-        /* vcycle = mcycle - hhidden_cycle */
++        /*
++         * vcycle = mcycle - hhidden_cycle,
++         * vinstret = minstret - hhidden_instret
++         */
+         riscv_pmu_read_ctr(env, val, false, ctr_index);
+-        *val -= env->hhidden_cycle;
++        *val -= csrno == CSR_CYCLE ? env->hhidden_cycle : env->hhidden_instret;
+         return RISCV_EXCP_NONE;
+     }
+ 
+diff --git a/target/riscv/xcv_csr.c b/target/riscv/xcv_csr.c
+index 93c2e9a6a5..e9df78c1f3 100644
+--- a/target/riscv/xcv_csr.c
++++ b/target/riscv/xcv_csr.c
+@@ -2,7 +2,7 @@
+  * CORE-V hidden-time CSRs (xcvhtime).
+  *
+  * Software-visible model of the CVA6 hidden-time extension: guest time and
+- * cycle stop while the hart runs with V=0, if htimectl.HHAE=1.
++ * cycle (and instret) stop while the hart runs with V=0, if htimectl.HHAE=1.
+  *
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+@@ -25,6 +25,15 @@ static uint64_t xcv_mcycle(CPURISCVState *env)
+     return val;
+ }
+ 
++/* Counts instructions only with -icount; otherwise host ticks, like mcycle */
++static uint64_t xcv_minstret(CPURISCVState *env)
++{
++    target_ulong val;
++
++    riscv_pmu_read_ctr(env, &val, false, 2);
++    return val;
++}
++
+ /*
+  * Called after every V change. Latch on V 1->0 whatever the target mode;
+  * accumulate on V 0->1 if HHAE. Nested transitions (V->HS->M->HS->V) only
+@@ -35,9 +44,11 @@ void riscv_xcvhtime_virt_changed(CPURISCVState *env, bool virt_en)
+     if (!virt_en) {
+         env->hexit_time = xcv_mtime(env);
+         env->hexit_cycle = xcv_mcycle(env);
++        env->hexit_instret = xcv_minstret(env);
+     } else if (env->htimectl & XCV_HTIMECTL_HHAE) {
+         env->hhidden_time += xcv_mtime(env) - env->hexit_time;
+         env->hhidden_cycle += xcv_mcycle(env) - env->hexit_cycle;
++        env->hhidden_instret += xcv_minstret(env) - env->hexit_instret;
+     }
+ 
+     riscv_timer_update_vtimers(env);
+@@ -71,6 +82,10 @@ static uint64_t *xcv_csr_ptr(CPURISCVState *env, int csrno)
+         return &env->hexit_cycle;
+     case CSR_XCV_HHIDDEN_CYCLE:
+         return &env->hhidden_cycle;
++    case CSR_XCV_HEXIT_INSTRET:
++        return &env->hexit_instret;
++    case CSR_XCV_HHIDDEN_INSTRET:
++        return &env->hhidden_instret;
+     default:
+         g_assert_not_reached();
+     }
+@@ -91,8 +106,9 @@ static RISCVException write_xcv(CPURISCVState *env, int csrno,
+     }
+     *xcv_csr_ptr(env, csrno) = val;
+ 
+-    /* The cycle CSRs feed no comparator */
+-    if (csrno != CSR_XCV_HEXIT_CYCLE && csrno != CSR_XCV_HHIDDEN_CYCLE) {
++    /* The cycle and instret CSRs feed no comparator */
++    if (csrno != CSR_XCV_HEXIT_CYCLE && csrno != CSR_XCV_HHIDDEN_CYCLE &&
++        csrno != CSR_XCV_HEXIT_INSTRET && csrno != CSR_XCV_HHIDDEN_INSTRET) {
+         riscv_timer_update_vtimers(env);
+     }
+ 
+@@ -109,5 +125,7 @@ const RISCVCSR xcv_csr_list[] = {
+     XCV_CSR(CSR_XCV_HVTIMECMP, "hvtimecmp"),
+     XCV_CSR(CSR_XCV_HEXIT_CYCLE, "hexit_cycle"),
+     XCV_CSR(CSR_XCV_HHIDDEN_CYCLE, "hhidden_cycle"),
++    XCV_CSR(CSR_XCV_HEXIT_INSTRET, "hexit_instret"),
++    XCV_CSR(CSR_XCV_HHIDDEN_INSTRET, "hhidden_instret"),
+     { }
+ };
+-- 
+2.47.3
+
