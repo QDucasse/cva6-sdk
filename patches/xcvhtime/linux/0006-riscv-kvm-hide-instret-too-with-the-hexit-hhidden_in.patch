@@ -1,0 +1,98 @@
+From 41d0851cc5ef9f916fd02dc13bfcdc80dc0240ea Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Tue, 13 Oct 2026 19:14:10 +0200
+Subject: [PATCH 6/6] riscv: kvm, hide instret too, with the
+ hexit/hhidden_instret CSRs
+
+---
+ arch/riscv/include/asm/csr.h               |  2 ++
+ arch/riscv/include/asm/kvm_vcpu_xcvhtime.h |  4 +++-
+ arch/riscv/kvm/vcpu_xcvhtime.c             | 14 ++++++++++++--
+ 3 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/arch/riscv/include/asm/csr.h b/arch/riscv/include/asm/csr.h
+index 16bbd8fc3..c0c496acf 100644
+--- a/arch/riscv/include/asm/csr.h
++++ b/arch/riscv/include/asm/csr.h
+@@ -393,6 +393,8 @@
+ #define CSR_HVTIMECMP		0x6c3
+ #define CSR_HEXIT_CYCLE		0x6c4
+ #define CSR_HHIDDEN_CYCLE	0x6c5
++#define CSR_HEXIT_INSTRET	0x6c6
++#define CSR_HHIDDEN_INSTRET	0x6c7
+ #define HTIMECTL_HHAE		_AC(0x1, UL)
+ #define CSR_HGEIP		0xe12
+ 
+diff --git a/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h b/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
+index 002e59e91..fa5ec198e 100644
+--- a/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
++++ b/arch/riscv/include/asm/kvm_vcpu_xcvhtime.h
+@@ -1,6 +1,6 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+ /*
+- * CORE-V hidden time (xcvhtime): per-vCPU state of the six hidden-time CSRs.
++ * CORE-V hidden time (xcvhtime): per-vCPU state of the eight hidden-time CSRs.
+  */
+ 
+ #ifndef __KVM_VCPU_RISCV_XCVHTIME_H
+@@ -17,6 +17,8 @@ struct kvm_vcpu_xcvhtime {
+ 	u64 hvtimecmp;
+ 	u64 hexit_cycle;
+ 	u64 hhidden_cycle;
++	u64 hexit_instret;
++	u64 hhidden_instret;
+ 	/* Last exit not hidden: rebase hexit_* before setting HHAE */
+ 	bool unhidden;
+ };
+diff --git a/arch/riscv/kvm/vcpu_xcvhtime.c b/arch/riscv/kvm/vcpu_xcvhtime.c
+index 395c86bd0..7ec32d6ec 100644
+--- a/arch/riscv/kvm/vcpu_xcvhtime.c
++++ b/arch/riscv/kvm/vcpu_xcvhtime.c
+@@ -38,9 +38,13 @@ void kvm_riscv_xcvhtime_debugfs_init(void)
+ 
+ void kvm_riscv_xcvhtime_enable(void)
+ {
++	if (!xcvhtime_available())
++		return;
++
+ 	/* mip[24] is only pending in V=1: it always traps out of the guest */
+-	if (xcvhtime_available())
+-		csr_set(CSR_IE, BIT(IRQ_XCV_HVTI));
++	csr_set(CSR_IE, BIT(IRQ_XCV_HVTI));
++	/* Guest instret reads return vinstret = minstret - hhidden_instret */
++	csr_set(CSR_HCOUNTEREN, BIT(CSR_INSTRET - CSR_CYCLE));
+ }
+ 
+ void kvm_riscv_xcvhtime_disable(void)
+@@ -70,6 +74,8 @@ void kvm_riscv_vcpu_xcvhtime_load(struct kvm_vcpu *vcpu)
+ 	csr_write(CSR_HVTIMECMP, h->hvtimecmp);
+ 	csr_write(CSR_HEXIT_CYCLE, h->hexit_cycle);
+ 	csr_write(CSR_HHIDDEN_CYCLE, h->hhidden_cycle);
++	csr_write(CSR_HEXIT_INSTRET, h->hexit_instret);
++	csr_write(CSR_HHIDDEN_INSTRET, h->hhidden_instret);
+ 	csr_write(CSR_HTIMECTL, h->htimectl);
+ }
+ 
+@@ -86,6 +92,8 @@ void kvm_riscv_vcpu_xcvhtime_put(struct kvm_vcpu *vcpu)
+ 	h->hvtimecmp = csr_read(CSR_HVTIMECMP);
+ 	h->hexit_cycle = csr_read(CSR_HEXIT_CYCLE);
+ 	h->hhidden_cycle = csr_read(CSR_HHIDDEN_CYCLE);
++	h->hexit_instret = csr_read(CSR_HEXIT_INSTRET);
++	h->hhidden_instret = csr_read(CSR_HHIDDEN_INSTRET);
+ 
+ 	/* Exit to userspace or preemption: not hidden (section 8.2) */
+ 	h->htimectl &= ~HTIMECTL_HHAE;
+@@ -118,8 +126,10 @@ void kvm_riscv_vcpu_xcvhtime_enter(struct kvm_vcpu *vcpu)
+ 	if (h->unhidden) {
+ 		h->hexit_time = csr_read(CSR_TIME);
+ 		h->hexit_cycle = csr_read(CSR_CYCLE);
++		h->hexit_instret = csr_read(CSR_INSTRET);
+ 		csr_write(CSR_HEXIT_TIME, h->hexit_time);
+ 		csr_write(CSR_HEXIT_CYCLE, h->hexit_cycle);
++		csr_write(CSR_HEXIT_INSTRET, h->hexit_instret);
+ 		h->unhidden = false;
+ 	}
+ 	if (!(h->htimectl & HTIMECTL_HHAE)) {
+-- 
+2.47.3
+

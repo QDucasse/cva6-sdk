@@ -1,7 +1,7 @@
 From dcffed6f706e21f34094305c2a72d7e5995fbe1d Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 16:09:37 +0200
-Subject: [PATCH 3/4] riscv: kvm, handle the xcvhtime interrupt 24 in the exit
+Subject: [PATCH 3/6] riscv: kvm, handle the xcvhtime interrupt 24 in the exit
  path
 
 ---

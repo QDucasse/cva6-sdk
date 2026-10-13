@@ -1,7 +1,7 @@
 From 15cdf751efb94db7408c2e859a18ab354ecf4d37 Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 16:08:59 +0200
-Subject: [PATCH 2/4] riscv: kvm, save and restore the xcvhtime CSRs, kept per
+Subject: [PATCH 2/6] riscv: kvm, save and restore the xcvhtime CSRs, kept per
  vCPU
 
 ---

@@ -1,7 +1,7 @@
 From 615bc957c26da7f336db27076eec4a6dc0536ecc Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 16:07:30 +0200
-Subject: [PATCH 1/4] riscv: add the xcvhtime hidden-time extension, its CSRs
+Subject: [PATCH 1/6] riscv: add the xcvhtime hidden-time extension, its CSRs
  and interrupt
 
 ---

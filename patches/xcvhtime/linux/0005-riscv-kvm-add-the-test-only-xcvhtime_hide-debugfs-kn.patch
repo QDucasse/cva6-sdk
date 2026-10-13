@@ -1,13 +1,8 @@
-From 77be4fb77bd2768060f7cfccee61097242789a55 Mon Sep 17 00:00:00 2001
+From 5f06dfd9f931f6e2f0aa0c7a1ada482054f31eb6 Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 17:13:50 +0200
-Subject: [PATCH 5/5] riscv: kvm, add the test-only xcvhtime_hide debugfs knob
+Subject: [PATCH 5/6] riscv: kvm, add the test-only xcvhtime_hide debugfs knob
 
-With the knob on, the guest is entered with HHAE=1, so every exit KVM
-handles in-kernel is hidden from the guest clock. WFI and vcpu_put (exit
-to userspace, preemption) clear HHAE and mark the vCPU unhidden; the next
-entry then rebases hexit_time/hexit_cycle to now, so idle and descheduled
-time stay visible.
 ---
  arch/riscv/include/asm/kvm_vcpu_xcvhtime.h |  5 ++
  arch/riscv/kvm/main.c                      |  2 +

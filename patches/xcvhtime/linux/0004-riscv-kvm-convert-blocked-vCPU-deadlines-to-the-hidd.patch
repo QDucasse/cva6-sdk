@@ -1,7 +1,7 @@
 From fcc09368e488d3827617a7db9329d1bea5ddb831 Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 16:10:36 +0200
-Subject: [PATCH 4/4] riscv: kvm, convert blocked-vCPU deadlines to the hidden
+Subject: [PATCH 4/6] riscv: kvm, convert blocked-vCPU deadlines to the hidden
  guest clock
 
 ---
