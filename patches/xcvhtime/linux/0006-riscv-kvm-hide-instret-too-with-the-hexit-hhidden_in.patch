@@ -1,7 +1,7 @@
 From 41d0851cc5ef9f916fd02dc13bfcdc80dc0240ea Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Tue, 13 Oct 2026 19:14:10 +0200
-Subject: [PATCH 6/6] riscv: kvm, hide instret too, with the
+Subject: [PATCH 6/7] riscv: kvm, hide instret too, with the
  hexit/hhidden_instret CSRs
 
 ---

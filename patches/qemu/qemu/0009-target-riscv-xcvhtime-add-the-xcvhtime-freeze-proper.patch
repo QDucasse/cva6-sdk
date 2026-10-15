@@ -1,0 +1,62 @@
+From a80093422000c87a04953cad9e234fc54e8f2dac Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Thu, 15 Oct 2026 14:46:33 +0200
+Subject: [PATCH 9/9] target/riscv: xcvhtime, add the xcvhtime-freeze property
+
+---
+ target/riscv/cpu.c                | 2 ++
+ target/riscv/cpu_cfg_fields.h.inc | 2 ++
+ target/riscv/xcv_csr.c            | 4 +++-
+ 3 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/target/riscv/cpu.c b/target/riscv/cpu.c
+index bdf8eead19..878acd1ddc 100644
+--- a/target/riscv/cpu.c
++++ b/target/riscv/cpu.c
+@@ -2690,6 +2690,8 @@ static const Property riscv_cpu_properties[] = {
+                        DEFAULT_RNMI_EXCPVEC),
+ #endif
+ 
++    DEFINE_PROP_BOOL("xcvhtime-freeze", RISCVCPU, cfg.xcvhtime_freeze, true),
++
+     DEFINE_PROP_BOOL("short-isa-string", RISCVCPU, cfg.short_isa_string, false),
+ 
+     DEFINE_PROP_BOOL("rvv_ta_all_1s", RISCVCPU, cfg.rvv_ta_all_1s, false),
+diff --git a/target/riscv/cpu_cfg_fields.h.inc b/target/riscv/cpu_cfg_fields.h.inc
+index 67d74406ac..e9f2e6af83 100644
+--- a/target/riscv/cpu_cfg_fields.h.inc
++++ b/target/riscv/cpu_cfg_fields.h.inc
+@@ -136,6 +136,8 @@ BOOL_FIELD(ext_ziccrse)
+ 
+ /* Vendor-specific custom extensions */
+ BOOL_FIELD(ext_xcvhtime)
++/* htimectl.HFRZ writable (CVA6 RVHiddenFreeze), only with xcvhtime */
++BOOL_FIELD(xcvhtime_freeze)
+ BOOL_FIELD(ext_xtheadba)
+ BOOL_FIELD(ext_xtheadbb)
+ BOOL_FIELD(ext_xtheadbs)
+diff --git a/target/riscv/xcv_csr.c b/target/riscv/xcv_csr.c
+index 8f8673ada7..318af402be 100644
+--- a/target/riscv/xcv_csr.c
++++ b/target/riscv/xcv_csr.c
+@@ -4,6 +4,7 @@
+  * Software-visible model of the CVA6 hidden-time extension: guest time and
+  * cycle (and instret) stop while the hart runs with V=0, if htimectl.HHAE=1.
+  * htimectl.HFRZ (cache freeze) is only stored: QEMU has no caches to freeze.
++ * Like CVA6 without RVHiddenFreeze, xcvhtime-freeze=false makes it read 0.
+  *
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+@@ -103,7 +104,8 @@ static RISCVException write_xcv(CPURISCVState *env, int csrno,
+                                 target_ulong val, uintptr_t ra)
+ {
+     if (csrno == CSR_XCV_HTIMECTL) {
+-        val &= XCV_HTIMECTL_HHAE | XCV_HTIMECTL_HFRZ;
++        val &= XCV_HTIMECTL_HHAE |
++               (riscv_cpu_cfg(env)->xcvhtime_freeze ? XCV_HTIMECTL_HFRZ : 0);
+     }
+     *xcv_csr_ptr(env, csrno) = val;
+ 
+-- 
+2.47.3
+

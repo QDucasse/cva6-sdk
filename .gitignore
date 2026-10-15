@@ -2,3 +2,4 @@
 /install*/
 /fitImage.its
 /build*.log
+__pycache__/

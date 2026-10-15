@@ -1,0 +1,47 @@
+From 08326c6fcfba6a82981abf6c72a9521a3865bd90 Mon Sep 17 00:00:00 2001
+From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
+Date: Wed, 14 Oct 2026 17:32:24 +0200
+Subject: [PATCH 8/9] target/riscv: xcvhtime, store the htimectl.HFRZ
+ cache-freeze bit
+
+---
+ target/riscv/cpu_bits.h | 1 +
+ target/riscv/xcv_csr.c  | 3 ++-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/target/riscv/cpu_bits.h b/target/riscv/cpu_bits.h
+index 4bf83a6db6..d4ba756d69 100644
+--- a/target/riscv/cpu_bits.h
++++ b/target/riscv/cpu_bits.h
+@@ -284,6 +284,7 @@
+ #define CSR_XCV_HEXIT_INSTRET   0x6C6
+ #define CSR_XCV_HHIDDEN_INSTRET 0x6C7
+ #define XCV_HTIMECTL_HHAE       BIT(0)
++#define XCV_HTIMECTL_HFRZ       BIT(1)
+ 
+ /* Hypervisor Configuration CSRs */
+ #define CSR_HENVCFG         0x60A
+diff --git a/target/riscv/xcv_csr.c b/target/riscv/xcv_csr.c
+index e9df78c1f3..8f8673ada7 100644
+--- a/target/riscv/xcv_csr.c
++++ b/target/riscv/xcv_csr.c
+@@ -3,6 +3,7 @@
+  *
+  * Software-visible model of the CVA6 hidden-time extension: guest time and
+  * cycle (and instret) stop while the hart runs with V=0, if htimectl.HHAE=1.
++ * htimectl.HFRZ (cache freeze) is only stored: QEMU has no caches to freeze.
+  *
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+@@ -102,7 +103,7 @@ static RISCVException write_xcv(CPURISCVState *env, int csrno,
+                                 target_ulong val, uintptr_t ra)
+ {
+     if (csrno == CSR_XCV_HTIMECTL) {
+-        val &= XCV_HTIMECTL_HHAE;
++        val &= XCV_HTIMECTL_HHAE | XCV_HTIMECTL_HFRZ;
+     }
+     *xcv_csr_ptr(env, csrno) = val;
+ 
+-- 
+2.47.3
+

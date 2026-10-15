@@ -1,7 +1,7 @@
 From 580c0e3248b3d1918d2bf32ad3174032a23f3b19 Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Tue, 13 Oct 2026 16:37:04 +0200
-Subject: [PATCH 7/7] target/riscv: xcvhtime, hide instret like cycle or time
+Subject: [PATCH 7/9] target/riscv: xcvhtime, hide instret like cycle or time
 
 Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 ---

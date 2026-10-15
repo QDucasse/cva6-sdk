@@ -1,7 +1,7 @@
 From 9aa49c6bd145a6703332585e034f1e3aa97a1898 Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 15:14:46 +0200
-Subject: [PATCH 5/7] target/riscv: xcvhtime, compare VSTIP against the hidden
+Subject: [PATCH 5/9] target/riscv: xcvhtime, compare VSTIP against the hidden
  guest clock
 
 Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>

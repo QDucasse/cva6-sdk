@@ -1,7 +1,7 @@
 From 4fed84d311188b7c6de356e7cbf9f7feb0de259a Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 15:13:03 +0200
-Subject: [PATCH 4/7] target/riscv: factor out riscv_timer_arm() for later use
+Subject: [PATCH 4/9] target/riscv: factor out riscv_timer_arm() for later use
 
 Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 ---

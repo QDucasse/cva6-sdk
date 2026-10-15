@@ -1,7 +1,7 @@
 From 55caad4c7e8809baf5aabd95a1783782827beed0 Mon Sep 17 00:00:00 2001
 From: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 Date: Mon, 12 Oct 2026 15:06:29 +0200
-Subject: [PATCH 2/7] target/riscv: add the xcvhtime CSRs
+Subject: [PATCH 2/9] target/riscv: add the xcvhtime CSRs
 
 Signed-off-by: Quentin Ducasse <quentin.ducasse@centralesupelec.fr>
 ---
